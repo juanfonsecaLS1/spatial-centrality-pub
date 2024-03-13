@@ -33,7 +33,7 @@ def netascore_to_routable_net(netascore_gdf: gpd.GeoDataFrame):
     net_b = net_a.rename(columns=mapping)
     net_b["inv"] = True
     # append inverted net
-    net = net_a.append(net_b, ignore_index=True)
+    net = pd.concat([net_a, net_b], ignore_index=True)
     # remove inverted-dir columns
     net.drop([f'{k}_tf' for k in cols_dir], axis=1, inplace=True)
     return net
