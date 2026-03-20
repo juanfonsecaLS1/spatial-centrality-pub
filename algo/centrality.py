@@ -13,7 +13,6 @@ from networkx.utils.decorators import not_implemented_for
 
 __all__ = ["betweenness_centrality", "edge_betweenness_centrality"]
 
-@nx._dispatch
 @py_random_state(4)
 def spatial_betweenness_centrality(G, w_orig, w_dest=None, k=None, normalized=True, weight=None, seed=None):
     if k is not None:
