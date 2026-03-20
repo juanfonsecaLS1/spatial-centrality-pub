@@ -1,0 +1,252 @@
+---
+title: "Spatial Betweenness Centrality: A Minimal Example"
+format: 
+  html:
+    embed-resources: true
+
+---
+
+This is minimal example to demonstrate the calculation of spatial betweenness centrality (SBC) on a street network, based on the code produced by [christian-werner](https://github.com/christian-werner/spatial-centrality-pub). The example uses an extract of the road network in Paris, France, and compares standard betweenness centrality (BC) with the spatial version (SBC) that incorporates node weights derived from a tessellation of the street network.
+
+## Set-up
+```{python}
+import osmnx as ox
+import geopandas as gpd
+import networkx as nx
+import pandas as pd
+import numpy as np
+import momepy as mp
+import matplotlib.pyplot as plt
+import sys
+sys.path.insert(0, 'algo')
+import centrality as sbc
+import net_helper as nh
+```
+
+
+## Loading the network and preparing the graph
+
+```{python}
+# Get the network as a MultiDiGraph
+G = ox.graph_from_point(center_point= [48.8577441884716, 2.338998102824722], dist=2500, network_type='drive')
+print(f"Network: {len(G.nodes)} nodes, {len(G.edges)} edges")
+
+G = ox.add_edge_speeds(G)  # Add edge speeds (km/h)
+G = ox.add_edge_travel_times(G)  
+```
+
+## Getting the biggest component
+
+```{python}
+largest_cc = max(nx.weakly_connected_components(G), key=len)
+G_largest = G.subgraph(largest_cc).copy()
+
+# Add a unique edge_id directly into the graph attributes
+for i, (u, v, k) in enumerate(G_largest.edges(keys=True)):
+    G_largest[u][v][k]['edge_id'] = i
+
+print(f"Largest connected component: {len(G_largest.nodes)} nodes, {len(G_largest.edges)} edges")
+
+# Re-extract nodes and edges, now filtered to the largest component and carrying `edge_id`
+G_undirected = G_largest.to_undirected()
+
+nodes_gdf, edges_filtered = ox.graph_to_gdfs(G_undirected)
+edges_filtered = edges_filtered.reset_index()
+
+print(f"Filtered edges: {len(edges_filtered)}")
+display(edges_filtered.head(2))
+```
+
+## Create tessellation based on undirected edges
+
+```{python}
+nodes_proj = nodes_gdf.to_crs(nodes_gdf.estimate_utm_crs())
+edges_proj = edges_filtered.to_crs(nodes_proj.crs)
+
+# Tessellation boundary
+aoi = nodes_proj.geometry.union_all().convex_hull.envelope
+aoi_buffered = aoi.buffer(50)
+
+print("Creating tessellation (appended cell)...")
+tess = mp.Tessellation(edges_proj, unique_id='edge_id',limit= aoi_buffered)
+tessellation_gdf = tess.tessellation.copy()
+
+print(f"Tessellation created: {len(tessellation_gdf)} polygons")
+tessellation_gdf['area'] = tessellation_gdf.geometry.area
+tessellation_gdf.set_index('edge_id', inplace=True)
+```
+
+### Visualising the tessellation and the network
+
+
+```{python}
+# Visualize the tessellation
+fig, ax = plt.subplots(figsize=(10, 10))
+
+# Plot tessellation polygons
+tessellation_gdf.plot(ax=ax, facecolor='lightgray', edgecolor='white', alpha=0.7, linewidth=0.5)
+
+# Plot the underlying road network
+edges_proj.plot(ax=ax, color='blue', linewidth=1, alpha=0.8)
+
+ax.set_title('Street Network and Tessellation')
+ax.set_axis_off()
+
+plt.tight_layout()
+plt.show()
+```
+
+## Calculating node weights from tesselated areas
+
+```{python}
+# Compute node weights from tessellated areas
+def compute_node_weights(edges_df, tessellation_df):
+    # Join edges with tessellation areas
+    tmp = edges_df[['u', 'v', 'geometry']].copy()
+    tmp['area'] = tessellation_df['area']
+    
+    # Split edge weight to end nodes
+    wa = tmp.groupby('u')[['area']].sum() / 2
+    wa.index.name = 'node_id'
+    wb = tmp.groupby('v')[['area']].sum() / 2
+    wb.index.name = 'node_id'
+    
+    # Combine weights for each node
+    w = wa.join(wb, lsuffix='_from', rsuffix='_to', how='outer')
+    w.fillna(0, inplace=True)
+    w['weight'] = w['area_from'] + w['area_to']
+    
+    return w
+
+# Pass the undirected edges so that each physical street only contributes once
+node_weights = compute_node_weights(edges_filtered.set_index('edge_id'), tessellation_gdf)
+print(f"\nNode weights computed for {len(node_weights)} nodes")
+print(f"Total weight: {node_weights['weight'].sum():.2f} m²")
+node_weights[['weight']].describe()
+```
+
+## Calculating Two versions of Betweenness Centrality
+
+### Standard Betweenness Centrality (BC)
+
+
+```{python}
+
+c_standard = nx.edge_betweenness_centrality(G_largest, normalized=True, weight='travel_time')
+print(f"Range: [{min(c_standard.values()):.6f}, {max(c_standard.values()):.6f}]")
+```
+
+### Spatial Betweenness Centrality (SBC)
+
+```{python}
+c_spatial = sbc.spatial_betweenness_centrality(
+    G_largest,
+    node_weights,
+    node_weights,
+    normalized=True,
+    weight='travel_time'
+)
+
+print(f"Range: [{min(c_spatial.values()):.6f}, {max(c_spatial.values()):.6f}]")
+```
+
+
+### Assigning centrality values back to edges for visualization
+```{python}
+
+edges_with_centrality = ox.graph_to_gdfs(G_largest, nodes=False, edges=True).reset_index()
+
+
+tdf = pd.DataFrame({
+    'u': [u for u, v, k in G_largest.edges(keys=True)],
+    'v': [v for u, v, k in G_largest.edges(keys=True)],
+    'key': [k for u, v, k in G_largest.edges(keys=True)],
+    'c_standard': [c_standard.get((u, v, k), 0) for u, v, k in G_largest.edges(keys=True)],
+    'c_spatial': [c_spatial.get((u, v, k), 0) for u, v, k in G_largest.edges(keys=True)]
+})
+
+
+edges_with_centrality = edges_with_centrality.merge(
+    tdf, 
+    on=['u', 'v', 'key'], 
+    how='left'
+)
+
+# Fill any NaN values with 0
+edges_with_centrality['c_standard'] = edges_with_centrality['c_standard'].fillna(0)
+edges_with_centrality['c_spatial'] = edges_with_centrality['c_spatial'].fillna(0)
+```
+
+Comparing the two measures:
+
+```{python}
+pd.DataFrame([
+    {'measure': 'Standard BC', 'min': min(c_standard.values()), 'max': max(c_standard.values()), 
+     'mean': np.mean(list(c_standard.values())), 'std': np.std(list(c_standard.values()))},
+    {'measure': 'Spatial BC', 'min': min(c_spatial.values()), 'max': max(c_spatial.values()),
+     'mean': np.mean(list(c_spatial.values())), 'std': np.std(list(c_spatial.values()))}
+])
+```
+
+```{python}
+plt.figure(figsize=(8, 6))
+plt.scatter(list(c_standard.values()), list(c_spatial.values()), alpha=0.5, color='purple')
+plt.xlabel('Standard Betweenness Centrality')
+plt.ylabel('Spatial Betweenness Centrality')
+plt.title('Comparison of Standard BC vs Spatial BC')
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+```
+
+## Visualising the spatial distribution of BC and SBC
+
+### Plot the MultiDiGraph with centrality values (for reference)
+```{python}
+edges_with_centrality["c_difference"] = edges_with_centrality["c_spatial"] - edges_with_centrality["c_standard"]
+edges_with_centrality.explore(column='c_standard', cmap='viridis', legend=True, figsize=(10, 10), alpha=0.8)
+```
+
+
+### Simplifying the graph for visualisation (from MuiltiDiGraph to MultiGraph)
+```{python}
+edges_filtered["c_standard"] = 0.0
+edges_filtered["c_spatial"] = 0.0
+
+for u, v, key in edges_filtered[['u', 'v', 'key']].values:
+    edges_filtered.loc[(edges_filtered['u'] == u) & (edges_filtered['v'] == v) & (edges_filtered['key'] == key), 'c_standard'] = c_standard.get((u, v, key), 0) + c_standard.get((v, u, key), 0)
+    edges_filtered.loc[(edges_filtered['u'] == u) & (edges_filtered['v'] == v) & (edges_filtered['key'] == key), 'c_spatial'] = c_spatial.get((u, v, key), 0) + c_spatial.get((v, u, key), 0)
+
+edges_filtered['c_difference'] = edges_filtered['c_spatial'] - edges_filtered['c_standard']
+```
+
+Plotting the spatial distribution of centrality values:
+```{python}
+
+fig, axes = plt.subplots(1, 2, figsize=(15, 6))
+edges_filtered.plot(ax=axes[0], column='c_standard', cmap='viridis', legend=True, alpha=0.8)
+axes[0].set_title('Standard Betweenness Centrality')
+edges_filtered.plot(ax=axes[1], column='c_spatial', cmap='viridis', legend=True, alpha=0.8)
+axes[1].set_title('Spatial Betweenness Centrality')
+for ax in axes:
+    ax.set_axis_off()
+plt.tight_layout()
+plt.show()
+```
+
+Plotting the difference between the two measures:
+
+```{python}
+edges_filtered.plot(column='c_difference', cmap='coolwarm', legend=True, figsize=(10, 10), alpha=0.8)
+plt.title('Difference between Spatial and Standard Betweenness Centrality')
+plt.axis('off')
+plt.tight_layout()
+plt.show()
+```
+
+Saving the geodataframe with centrality values for further analysis:
+```{python}
+#| eval: false
+edges_filtered.to_file("summary_undirected.gpkg", driver='GPKG')
+tessellation_gdf.to_file("summary_undirected.gpkg", driver='GPKG', layer='tessellation')
+```
