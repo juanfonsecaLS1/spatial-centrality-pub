@@ -3,7 +3,6 @@ title: "Spatial Betweenness Centrality: A Minimal Example"
 format: 
   html:
     embed-resources: true
-
 ---
 
 This is minimal example to demonstrate the calculation of spatial betweenness centrality (SBC) on a street network, based on the code produced by [christian-werner](https://github.com/christian-werner/spatial-centrality-pub). The example uses an extract of the road network in Paris, France, and compares standard betweenness centrality (BC) with the spatial version (SBC) that incorporates node weights derived from a tessellation of the street network.
@@ -222,7 +221,6 @@ edges_filtered['c_difference'] = edges_filtered['c_spatial'] - edges_filtered['c
 
 Plotting the spatial distribution of centrality values:
 ```{python}
-
 fig, axes = plt.subplots(1, 2, figsize=(15, 6))
 edges_filtered.plot(ax=axes[0], column='c_standard', cmap='viridis', legend=True, alpha=0.8)
 axes[0].set_title('Standard Betweenness Centrality')
@@ -247,6 +245,7 @@ plt.show()
 Saving the geodataframe with centrality values for further analysis:
 ```{python}
 #| eval: false
+
 edges_filtered.to_file("summary_undirected.gpkg", driver='GPKG')
 tessellation_gdf.to_file("summary_undirected.gpkg", driver='GPKG', layer='tessellation')
 ```
